@@ -1,0 +1,27 @@
+# Data: the PASEC files are large (373 MB) and distributed by CONFEMEN on registration.
+# They are never committed. See data/README.md for how to obtain them.
+data/raw/*
+!data/raw/.gitkeep
+data/processed/*
+!data/processed/.gitkeep
+*.dta
+*.zip
+*.sav
+*.parquet
+*.pkl
+
+# Python
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+
+# Environments
+.venv/
+venv/
+env/
+.conda/
+
+# Editors and OS
+.vscode/
+.idea/
+.DS_Store

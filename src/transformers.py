@@ -1,9 +1,12 @@
-"""Data loading, missing-value cleaning and label construction for PASEC2019 Grade 6.
+"""Data loading, missing-value cleaning, labels and custom transformers for PASEC2019 Grade 6.
 
 Every function here is deterministic and never modifies the raw file.
 Sources:
-- PASEC2019 data manual (CONFEMEN), Table 5.17, p. 66, for the proficiency cutoffs.
+- PASEC2019 data manual (CONFEMEN), Table 5.17, p. 66, for the proficiency cutoffs;
+  Chapter 1, Section 3.7, p. 24, for the final student weight rwgt0.
 - AFLEARN PASEC2019_Grade6_EN_labels.R for the value-label sets and sentinel codes.
+- World Bank WDI, indicator SE.XPD.TOTL.GD.ZS, for the country-level indicator in
+  data/external/country_indicators.csv.
 """
 from __future__ import annotations
 
@@ -12,10 +15,14 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from sklearn.base import BaseEstimator, TransformerMixin
+from sklearn.experimental import enable_iterative_imputer  # noqa: F401
+from sklearn.impute import IterativeImputer
 
 SRC_DIR = Path(__file__).resolve().parent
 RAW_ZIP = SRC_DIR.parent / "data" / "raw" / "PASEC2019_INT_STATA.zip"
 RAW_MEMBER = "PASEC2019_GRADE6_INT.dta"
+COUNTRY_INDICATORS_CSV = SRC_DIR.parent / "data" / "external" / "country_indicators.csv"
 
 # PASEC2019 manual, Table 5.17 (end of primary, mathematics):
 # 433.28 < PV <= 521.46 is the band just below the PASEC minimum proficiency level.
@@ -23,6 +30,11 @@ PASEC_MIN_MATHS_G6 = 521.46
 N_PLAUSIBLE_VALUES = 5
 MATHS_PV = [f"MATHS_PV{i}" for i in range(1, N_PLAUSIBLE_VALUES + 1)]
 READING_PV = [f"LECT_PV{i}" for i in range(1, N_PLAUSIBLE_VALUES + 1)]
+
+# rwgt0 is the final student weight; rwgt1-rwgt90 are replicate weights for
+# standard errors (manual, Chapter 1, Section 3.7). None of them is a feature:
+# rwgt0 is used to weight the loss and the evaluation metrics.
+SURVEY_WEIGHT = "rwgt0"
 
 # Columns that must never enter the feature matrix.
 TEST_ITEMS = [f"f{i}" for i in range(1, 99)] + [f"m{i}" for i in range(1, 85)]
@@ -317,9 +329,282 @@ def make_label(df: pd.DataFrame, cutoff: float = PASEC_MIN_MATHS_G6,
     return (votes >= min_votes).astype("int8").rename("below_min_maths")
 
 
+def votes_below_cutoff(df: pd.DataFrame, cutoff: float = PASEC_MIN_MATHS_G6) -> pd.Series:
+    """Number of the five maths plausible values at or below the cutoff (0 to 5)."""
+    return (df[MATHS_PV] <= cutoff).sum(axis=1).rename("votes_below")
+
+
+def is_borderline(votes: pd.Series) -> pd.Series:
+    """True when the five plausible values fall on both sides of the cutoff."""
+    return ((votes > 0) & (votes < N_PLAUSIBLE_VALUES)).rename("borderline")
+
+
 def label_per_plausible_value(df: pd.DataFrame,
                               cutoff: float = PASEC_MIN_MATHS_G6) -> pd.DataFrame:
     """Five alternative labels, one per plausible value, for the evaluation
     sensitivity check (metrics are computed against each and averaged)."""
     return (df[MATHS_PV] <= cutoff).astype("int8").set_axis(
         [f"below_min_pv{i}" for i in range(1, N_PLAUSIBLE_VALUES + 1)], axis=1)
+
+
+# Features selected in the preprocessing strategy (reports/Phase1_Strategy_Report.pdf, Section 2.2)
+NUMERIC_FEATURES = ["ses", "qe62", "qm22"]
+BINARY_FEATURES = ["qe621a", "qe621b", "qe68"]
+ORDINAL_FEATURES = ["qm5", "qd31", "qe620"]
+COUNTRY = "ID_PAYS"
+COUNTRY_NAMES = {
+    1.0: "Benin", 2.0: "Burkina Faso", 3.0: "Burundi", 4.0: "Cameroon", 5.0: "Congo",
+    6.0: "Cote d'Ivoire", 7.0: "Gabon", 8.0: "Guinea", 9.0: "Madagascar", 10.0: "Niger",
+    11.0: "DR Congo", 12.0: "Senegal", 13.0: "Chad", 14.0: "Togo",
+}
+FEATURES = NUMERIC_FEATURES + BINARY_FEATURES + ORDINAL_FEATURES + [COUNTRY]
+
+# Category order for the ordinal encoder (PASEC codes after sentinel cleaning).
+ORDINAL_CATEGORIES = [
+    [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],  # qm5: no training ... more than three years
+    [1.0, 2.0, 3.0, 4.0],            # qd31: city, suburb, large village, small village
+    [1.0, 2.0, 3.0, 4.0],            # qe620: always, often, sometimes, never
+]
+
+IMPUTE_STRATEGY = {
+    "ses": "mean",       # near-symmetric (skew -0.09)
+    "qe62": "median",    # right-skewed (skew 0.64)
+    "qm22": "median",    # strongly right-skewed (skew 3.32)
+    **{c: "most_frequent" for c in BINARY_FEATURES + ORDINAL_FEATURES},
+}
+
+OUTLIER_RULES = {"ses": "zscore", "qe62": "iqr", "qm22": "iqr"}
+
+
+def prepare_features(clean: pd.DataFrame) -> pd.DataFrame:
+    """Select the model features from the sentinel-cleaned frame.
+
+    Only fixed, data-independent rules happen here, so it is safe before the split:
+    a class enrolment of 0 (qm22) is impossible and becomes missing, and Yes/No
+    answers are recoded from PASEC's 1 = Yes, 2 = No to 1 = Yes, 0 = No.
+    """
+    X = clean[FEATURES].apply(pd.to_numeric, errors="coerce").astype(float)
+    X.loc[X["qm22"] == 0, "qm22"] = np.nan
+    X[BINARY_FEATURES] = X[BINARY_FEATURES].replace({2.0: 0.0})
+    return X
+
+
+class CountryImputer(BaseEstimator, TransformerMixin):
+    """Fill missing values with a statistic computed inside each country.
+
+    Missingness in PASEC depends on the country, so a value is filled with the
+    mean, median or mode of students from the same country in the training data.
+    A country with fewer than `min_count` observed values falls back to the
+    statistic of the whole training set. With `add_indicator`, a 0/1 column
+    `<feature>_missing` records which values were filled.
+    """
+
+    def __init__(self, strategy=None, group_col=COUNTRY, min_count=30, add_indicator=True):
+        self.strategy = strategy
+        self.group_col = group_col
+        self.min_count = min_count
+        self.add_indicator = add_indicator
+
+    @staticmethod
+    def _stat(values: pd.Series, how: str) -> float:
+        values = values.dropna()
+        if how == "mean":
+            return float(values.mean())
+        if how == "median":
+            return float(values.median())
+        return float(values.mode().iloc[0])
+
+    def fit(self, X, y=None):
+        X = pd.DataFrame(X)
+        strategy = self.strategy or IMPUTE_STRATEGY
+        self.columns_ = [c for c in strategy if c in X.columns]
+        self.global_ = {c: self._stat(X[c], strategy[c]) for c in self.columns_}
+        self.by_group_ = {}
+        for country, part in X.groupby(self.group_col):
+            self.by_group_[country] = {
+                c: self._stat(part[c], strategy[c]) if part[c].notna().sum() >= self.min_count else self.global_[c]
+                for c in self.columns_
+            }
+        self.indicator_columns_ = [c for c in self.columns_ if X[c].isna().any()] if self.add_indicator else []
+        self.feature_names_in_ = np.array(X.columns)
+        return self
+
+    def transform(self, X):
+        X = pd.DataFrame(X).copy()
+        missing = X[self.indicator_columns_].isna()
+        fill = pd.DataFrame(
+            [self.by_group_.get(country, self.global_) for country in X[self.group_col]],
+            index=X.index,
+        )
+        for c in self.columns_:
+            X[c] = X[c].fillna(fill[c])
+        for c in self.indicator_columns_:
+            X[f"{c}_missing"] = missing[c].astype(float)
+        return X
+
+    def get_feature_names_out(self, input_features=None):
+        return np.array(list(self.feature_names_in_) + [f"{c}_missing" for c in self.indicator_columns_])
+
+
+class CountryIterativeImputer(BaseEstimator, TransformerMixin):
+    """MICE-style alternative to CountryImputer, used as a sensitivity check.
+
+    Each feature with gaps is predicted from the other features and the
+    country dummies (scikit-learn IterativeImputer, BayesianRidge, 10 rounds).
+    Imputed binary and ordinal answers are rounded to the nearest valid code.
+    Output columns match CountryImputer, including the `<feature>_missing` flags.
+    """
+
+    def __init__(self, columns=None, group_col=COUNTRY, max_iter=10, random_state=0):
+        self.columns = columns
+        self.group_col = group_col
+        self.max_iter = max_iter
+        self.random_state = random_state
+
+    def _design(self, X):
+        dummies = pd.get_dummies(X[self.group_col].astype(float), prefix="c", dtype=float)
+        dummies = dummies.reindex(columns=self.dummy_columns_, fill_value=0.0)
+        return pd.concat([X[self.columns_], dummies], axis=1)
+
+    def fit(self, X, y=None):
+        X = pd.DataFrame(X)
+        self.columns_ = list(self.columns or IMPUTE_STRATEGY)
+        self.dummy_columns_ = list(pd.get_dummies(X[self.group_col].astype(float), prefix="c").columns)
+        self.imputer_ = IterativeImputer(max_iter=self.max_iter, random_state=self.random_state)
+        self.imputer_.fit(self._design(X))
+        self.indicator_columns_ = [c for c in self.columns_ if X[c].isna().any()]
+        self.feature_names_in_ = np.array(X.columns)
+        return self
+
+    def transform(self, X):
+        X = pd.DataFrame(X).copy()
+        missing = X[self.indicator_columns_].isna()
+        filled = pd.DataFrame(self.imputer_.transform(self._design(X))[:, :len(self.columns_)],
+                              columns=self.columns_, index=X.index)
+        for c, codes in zip(BINARY_FEATURES + ORDINAL_FEATURES, [[0.0, 1.0]] * 3 + ORDINAL_CATEGORIES):
+            lo, hi = min(codes), max(codes)
+            filled[c] = filled[c].round().clip(lo, hi)
+        for c in self.columns_:
+            X[c] = X[c].fillna(filled[c])
+        for c in self.indicator_columns_:
+            X[f"{c}_missing"] = missing[c].astype(float)
+        return X
+
+    def get_feature_names_out(self, input_features=None):
+        return np.array(list(self.feature_names_in_) + [f"{c}_missing" for c in self.indicator_columns_])
+
+
+class Winsorizer(BaseEstimator, TransformerMixin):
+    """Cap extreme values at bounds learned on the training data.
+
+    Rules per column: "zscore" uses mean +/- 3 SD (near-normal features),
+    "iqr" uses Q1 - 1.5 IQR and Q3 + 1.5 IQR (skewed features).
+    Rows are never removed.
+    """
+
+    def __init__(self, rules=None, z=3.0, k=1.5):
+        self.rules = rules
+        self.z = z
+        self.k = k
+
+    def fit(self, X, y=None):
+        X = pd.DataFrame(X)
+        rules = self.rules or OUTLIER_RULES
+        self.bounds_ = {}
+        for c in X.columns:
+            values = X[c].dropna()
+            if rules.get(c) == "zscore":
+                mu, sd = values.mean(), values.std()
+                self.bounds_[c] = (mu - self.z * sd, mu + self.z * sd)
+            elif rules.get(c) == "iqr":
+                q1, q3 = values.quantile([0.25, 0.75])
+                self.bounds_[c] = (q1 - self.k * (q3 - q1), q3 + self.k * (q3 - q1))
+        self.n_capped_ = {
+            c: int(((X[c] < lo) | (X[c] > hi)).sum()) for c, (lo, hi) in self.bounds_.items()
+        }
+        self.feature_names_in_ = np.array(X.columns)
+        return self
+
+    def transform(self, X):
+        X = pd.DataFrame(X, columns=self.feature_names_in_).copy()
+        for c, (lo, hi) in self.bounds_.items():
+            X[c] = X[c].clip(lo, hi)
+        return X
+
+    def get_feature_names_out(self, input_features=None):
+        return self.feature_names_in_
+
+
+class Log1pColumns(BaseEstimator, TransformerMixin):
+    """Apply log(1 + x) to the listed columns and leave the others unchanged."""
+
+    def __init__(self, columns=("qm22",)):
+        self.columns = columns
+
+    def fit(self, X, y=None):
+        self.feature_names_in_ = np.array(pd.DataFrame(X).columns)
+        return self
+
+    def transform(self, X):
+        X = pd.DataFrame(X, columns=self.feature_names_in_).copy()
+        for c in self.columns:
+            if c in X.columns:
+                X[c] = np.log1p(X[c])
+        return X
+
+    def get_feature_names_out(self, input_features=None):
+        return self.feature_names_in_
+
+
+# Country descriptors built from the survey answers themselves (no labels):
+# the share or average of each answer among a country's students.
+CONTEXT_COLUMNS = {"ctx_ses": "ses", "ctx_qm22": "qm22", "ctx_qe68": "qe68", "ctx_qd31": "qd31", "ctx_qe620": "qe620"}
+
+
+def load_country_indicators(path: Path | str = COUNTRY_INDICATORS_CSV) -> pd.DataFrame:
+    """World Bank indicators per PASEC country code, one column per indicator."""
+    table = pd.read_csv(path)
+    wide = table.pivot(index="ID_PAYS", columns="indicator", values="value").astype(float)
+    wide.index = wide.index.astype(float)
+    return wide
+
+
+class CountryContext(BaseEstimator, TransformerMixin):
+    """Describe each student's country with continuous country-level columns.
+
+    One-hot country columns carry no information for a country that was not in
+    the training data. This transformer adds country averages of survey answers
+    (CONTEXT_COLUMNS) and, optionally, external indicators such as education
+    spending. Averages for countries seen in training come from the training
+    rows; for an unseen country they are computed from that country's own rows
+    at transform time, which uses answers only, never labels.
+    """
+
+    def __init__(self, columns=None, external=None, group_col=COUNTRY):
+        self.columns = columns
+        self.external = external
+        self.group_col = group_col
+
+    def _averages(self, X):
+        columns = self.columns or CONTEXT_COLUMNS
+        return X.groupby(self.group_col)[list(columns.values())].mean().set_axis(list(columns), axis=1)
+
+    def fit(self, X, y=None):
+        X = pd.DataFrame(X)
+        self.table_ = self._averages(X)
+        self.external_columns_ = [] if self.external is None else list(self.external.columns)
+        self.feature_names_in_ = np.array(X.columns)
+        return self
+
+    def transform(self, X):
+        X = pd.DataFrame(X).copy()
+        unseen = ~X[self.group_col].isin(self.table_.index)
+        table = pd.concat([self.table_, self._averages(X[unseen])]) if unseen.any() else self.table_
+        context = table.reindex(X[self.group_col].values).set_index(X.index)
+        if self.external is not None:
+            context = context.join(self.external.reindex(X[self.group_col].values).set_index(X.index))
+        return pd.concat([X, context], axis=1)
+
+    def get_feature_names_out(self, input_features=None):
+        columns = self.columns or CONTEXT_COLUMNS
+        return np.array(list(self.feature_names_in_) + list(columns) + self.external_columns_)

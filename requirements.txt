@@ -5,6 +5,7 @@ scipy==1.18.1
 scikit-learn==1.9.1
 statsmodels==0.15.0
 xgboost==3.4.1
+catboost==1.2.10
 matplotlib==3.11.2
 seaborn==0.13.2
 missingno==0.5.2

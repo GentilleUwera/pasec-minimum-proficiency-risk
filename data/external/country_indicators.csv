@@ -1,0 +1,15 @@
+ID_PAYS,country,iso3,indicator,year,value,source,retrieved
+1,Benin,BEN,edu_spending_pct_gdp,2019,2.732,"World Bank WDI SE.XPD.TOTL.GD.ZS (Government expenditure on education, % of GDP)",2026-10-23
+2,Burkina Faso,BFA,edu_spending_pct_gdp,2019,5.456,"World Bank WDI SE.XPD.TOTL.GD.ZS (Government expenditure on education, % of GDP)",2026-10-23
+3,Burundi,BDI,edu_spending_pct_gdp,2019,5.347,"World Bank WDI SE.XPD.TOTL.GD.ZS (Government expenditure on education, % of GDP)",2026-10-23
+4,Cameroon,CMR,edu_spending_pct_gdp,2019,3.047,"World Bank WDI SE.XPD.TOTL.GD.ZS (Government expenditure on education, % of GDP)",2026-10-23
+5,Congo,COG,edu_spending_pct_gdp,2019,3.247,"World Bank WDI SE.XPD.TOTL.GD.ZS (Government expenditure on education, % of GDP)",2026-10-23
+6,Cote d'Ivoire,CIV,edu_spending_pct_gdp,2019,3.413,"World Bank WDI SE.XPD.TOTL.GD.ZS (Government expenditure on education, % of GDP)",2026-10-23
+7,Gabon,GAB,edu_spending_pct_gdp,2019,2.874,"World Bank WDI SE.XPD.TOTL.GD.ZS (Government expenditure on education, % of GDP)",2026-10-23
+8,Guinea,GIN,edu_spending_pct_gdp,2019,1.858,"World Bank WDI SE.XPD.TOTL.GD.ZS (Government expenditure on education, % of GDP)",2026-10-23
+9,Madagascar,MDG,edu_spending_pct_gdp,2019,3.013,"World Bank WDI SE.XPD.TOTL.GD.ZS (Government expenditure on education, % of GDP)",2026-10-23
+10,Niger,NER,edu_spending_pct_gdp,2019,3.534,"World Bank WDI SE.XPD.TOTL.GD.ZS (Government expenditure on education, % of GDP)",2026-10-23
+11,DR Congo,COD,edu_spending_pct_gdp,2017,1.455,"World Bank WDI SE.XPD.TOTL.GD.ZS (Government expenditure on education, % of GDP)",2026-10-23
+12,Senegal,SEN,edu_spending_pct_gdp,2019,5.035,"World Bank WDI SE.XPD.TOTL.GD.ZS (Government expenditure on education, % of GDP)",2026-10-23
+13,Chad,TCD,edu_spending_pct_gdp,2019,2.372,"World Bank WDI SE.XPD.TOTL.GD.ZS (Government expenditure on education, % of GDP)",2026-10-23
+14,Togo,TGO,edu_spending_pct_gdp,2019,4.202,"World Bank WDI SE.XPD.TOTL.GD.ZS (Government expenditure on education, % of GDP)",2026-10-23

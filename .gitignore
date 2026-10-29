@@ -1,5 +1,5 @@
 # Data: the PASEC files are large (373 MB) and distributed by CONFEMEN on registration.
-# They are never committed. See data/README.md for how to obtain them.
+# They are never committed. See README.md (Getting the Data) for how to obtain them.
 data/raw/*
 !data/raw/.gitkeep
 data/processed/*
